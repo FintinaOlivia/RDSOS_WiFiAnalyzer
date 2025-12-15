@@ -8,4 +8,4 @@ fi
 
 source wifi_analyzer/bin/activate
 cd src
-python3 startup.py
+sudo ../wifi_analyzer/bin/python3 startup.py

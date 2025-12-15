@@ -18,14 +18,18 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("WiFi Analyzer & Packet Sniffer")
-        self.resize(1500, 800)
+        self.resize(1800, 800)
 
-        tabs = QTabWidget()
-        tabs.addTab(WifiAnalyzerTab(), "WiFi Analyzer")
-        tabs.addTab(PacketSnifferTab(), "Package Sniffer")
+        self.tabs = QTabWidget()
+        self.tabs.addTab(WifiAnalyzerTab(), "WiFi Analyzer")
+        self.tabs.addTab(PacketSnifferTab(), "Package Sniffer")
 
-        self.setCentralWidget(tabs)
+        self.setCentralWidget(self.tabs)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
+    def on_tab_changed(self, index):
+        if self.tabs.tabText(index) == "Package Sniffer":
+            self.tabs.widget(index).on_tab_activated()
 
 def main():
     app = QApplication(sys.argv)
