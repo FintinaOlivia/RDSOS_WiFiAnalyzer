@@ -16,6 +16,10 @@ import pyqtgraph as pg
 
 from wifi_scanner import WiFiScanner
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 STALE_TIMEOUT = 5 
 
 class WiFiSignals(QObject):
@@ -44,7 +48,7 @@ class WifiAnalyzerTab(QWidget):
         self.plot.setLabel("left", "Signal Strength (dBm)")
         self.plot.setLabel("bottom", "Channel")
         self.plot.setXRange(1, 14)
-        self.plot.setYRange(-100, -40)
+        self.plot.setYRange(-100, -20)
         self.plot.showGrid(x=True, y=True)
 
         plot_layout.addWidget(self.plot)
@@ -159,6 +163,10 @@ class WifiAnalyzerTab(QWidget):
 
     def update_network(self, ssid, mac, rssi, security, freq, channel):
         vendor = self.vendor_table.get(mac[:8].upper(), "Unknown")
+        logging.info(
+        f"Debugging list_callback with SSID={ssid}, MAC={mac}, RSSI={rssi}, "
+        f"Security={security}, Freq={freq}, Channel={channel}"
+        )
 
         for row in range(self.network_table.rowCount()):
             if self.network_table.item(row, 1).text() == mac:

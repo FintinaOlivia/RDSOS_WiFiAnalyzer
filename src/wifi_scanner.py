@@ -1,9 +1,20 @@
 import threading
 import time
+import os
 from scapy.all import *
 from collections import defaultdict
 import time
 import matplotlib.pyplot as plt
+import logging
+import socket
+
+from wifi_packet_parser import WiFiPacketParser
+
+# logging.basicConfig(
+#     level=logging.INFO,  
+#     format="%(asctime)s [%(levelname)s] %(message)s"
+# )
+logger = logging.getLogger(__name__)
 
 CHANNELS = list(range(1, 14))  
 CHANNELS_5G = [
@@ -21,12 +32,11 @@ class WiFiScanner:
         self.stop_flag = False
         self.plot_timer = None
         self.refresh_signals = time.time()
-
         self.ssid_channels = defaultdict(dict)
         self.signal_counter = defaultdict(dict)
+        self.lock = threading.Lock()
 
     def set_channel(self, ch):
-        import os
         os.system(f"sudo iw dev {self.interface} set channel {ch}")
 
     def channel_hopper(self):
@@ -42,8 +52,52 @@ class WiFiScanner:
             idx = (idx + 1) % len(SCAN_CHANNELS)
             time.sleep(0.20)
 
-
     def handle_packet(self, pkt):
+        logger.info("Received packet, length=%d", len(pkt))
+
+        rssi, radiotap_len = WiFiPacketParser.parse_radiotap(pkt)
+        if radiotap_len is None:
+            logger.debug("Packet too short for Radiotap header, skipping")
+            return
+
+        frame_type, frame_subtype, mac = WiFiPacketParser.parse_80211_header(pkt, radiotap_len)
+        # Only process Beacon (8) or Probe Response (5)
+        if frame_type != 0 or frame_subtype not in (5, 8):
+            return
+
+        ssid, channel, security = WiFiPacketParser.parse_tagged_parameters(pkt, radiotap_len)
+
+        logging.info(f"Parsed parameters: SSID={ssid}, Channel={channel}, Security={security}")
+
+        if not ssid or not channel:
+            return
+
+        freq = 2412 + (channel - 1) * 5
+        timestamp = time.time()
+        logging.info(f"Calculated frequency: {freq} MHz, Timestamp: {timestamp}")
+
+
+        self.signal_counter.setdefault(ssid, {})[channel] = timestamp
+        self.ssid_channels.setdefault(ssid, {})[channel] = rssi
+        expire = timestamp - 30
+
+        for s in list(self.signal_counter.keys()):
+            for ch in list(self.signal_counter[s].keys()):
+                if self.signal_counter[s][ch] < expire:
+                    del self.signal_counter[s][ch]
+                    del self.ssid_channels[s][ch]
+
+            if not self.signal_counter[s]:
+                del self.signal_counter[s]
+            if not self.ssid_channels[s]:
+                del self.ssid_channels[s]
+
+        if self.ui_callback:
+            self.ui_callback(self.ssid_channels)
+            self.list_callback(ssid, mac, rssi, security, freq, channel)
+
+
+    def handle_packet_scapy(self, pkt):
         if pkt.haslayer(Dot11Beacon) or pkt.haslayer(Dot11ProbeResp):
             ssid = pkt[Dot11Elt].info.decode(errors="ignore").strip()
             if not ssid:
@@ -62,11 +116,10 @@ class WiFiScanner:
             if hasattr(pkt, "dBm_AntSignal"):
                 rssi = pkt.dBm_AntSignal
 
-            current_timestamp = time.time()
-            self.signal_counter[ssid][channel] = current_timestamp
+            timestamp = time.time()
+            self.signal_counter[ssid][channel] = timestamp
             self.ssid_channels[ssid][channel] = rssi
-
-            expire_time = current_timestamp - 30
+            expire_time = timestamp - 30
 
             for s in list(self.signal_counter.keys()):
                 for ch in list(self.signal_counter[s].keys()):
@@ -82,7 +135,6 @@ class WiFiScanner:
 
             if self.ui_callback:
                 self.ui_callback(self.ssid_channels)
- 
                 self.list_callback(ssid, mac, rssi, security, freq, channel)
 
 
@@ -91,7 +143,23 @@ class WiFiScanner:
 
         threading.Thread(target=self.channel_hopper, daemon=True).start()
 
-        sniff(iface=self.interface, prn=self.handle_packet, monitor=True)
+        # sniff(iface=self.interface, prn=self.handle_packet, monitor=True)
+
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+        s.bind((self.interface, 0))
+        logger.info("Bound socket")
+
+        while self.stop_flag == False:
+            try:
+                pkt = s.recv(4096)
+                self.handle_packet(pkt)
+            except socket.timeout:
+                continue 
+            except Exception:
+                continue 
+
+        s.close()
+
 
 
     def stop(self):
