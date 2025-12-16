@@ -1,46 +1,55 @@
+import threading
+import csv
+import os
+import math
+import time 
+
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout, QTabWidget,
-    QListWidget, QLabel, QComboBox,
-    QTableWidget, QTableWidgetItem,
-    QGroupBox, QSizePolicy
+    QWidget, QHBoxLayout, QVBoxLayout,
+    QGroupBox, QTableWidget, QTableWidgetItem,
+    QSizePolicy
 )
-from PyQt6.QtGui import QPainter, QColor
+from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter
 
-class SignalCanvas(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumSize(250, 250)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
+import pyqtgraph as pg
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(30, 30, 30))
-        painter.setPen(QColor(0, 200, 0))
+from wifi_scanner import WiFiScanner
 
-        w, h = self.width(), self.height()
-        for i in range(1, 6):
-            painter.drawEllipse(
-                w // 2 - i * 40,
-                h // 2 - i * 40,
-                i * 80,
-                i * 80
-            )
+STALE_TIMEOUT = 5 
+
+class WiFiSignals(QObject):
+    update_plot = pyqtSignal(dict)
+    update_network = pyqtSignal(str, str, int, list, int, int)
+
 
 class WifiAnalyzerTab(QWidget):
-    def __init__(self):
+    def __init__(self, interface="wlp3s0", vendor_table=None):
         super().__init__()
+
+        self.vendor_table = vendor_table or self.get_vendor_table()
+        self.curves = {}
+        self.scanner = None
 
         main_layout = QHBoxLayout(self)
 
-        graphic_box = QGroupBox("Signal Visualization")
-        graphic_layout = QVBoxLayout()
-        graphic_layout.addWidget(SignalCanvas())
-        graphic_box.setLayout(graphic_layout)
+        plot_box = QGroupBox("WiFi Channel Analyzer")
+        plot_layout = QVBoxLayout(plot_box)
 
-        self.network_table = QTableWidget()
-        self.network_table.setColumnCount(7)
+        self.plot = pg.PlotWidget()
+        self.plot.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+        self.plot.setLabel("left", "Signal Strength (dBm)")
+        self.plot.setLabel("bottom", "Channel")
+        self.plot.setXRange(1, 14)
+        self.plot.setYRange(-100, -40)
+        self.plot.showGrid(x=True, y=True)
+
+        plot_layout.addWidget(self.plot)
+
+        self.network_table = QTableWidget(0, 7)
         self.network_table.setHorizontalHeaderLabels([
             "Signal",
             "MAC",
@@ -50,7 +59,8 @@ class WifiAnalyzerTab(QWidget):
             "Freq",
             "Channel"
         ])
-        self.network_table.setColumnWidth(0, 35)
+        self.network_table.setColumnWidth(0, 50)
+        
         self.network_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
@@ -60,38 +70,101 @@ class WifiAnalyzerTab(QWidget):
         self.network_table.horizontalHeader().setStretchLastSection(True)
         self.network_table.setAlternatingRowColors(True)
 
-        main_layout.addWidget(graphic_box, 2)
-        main_layout.addWidget(self.network_table, 1)
+        main_layout.addWidget(plot_box, 3)
+        main_layout.addWidget(self.network_table, 2)
 
-    def make_signal_icon(color: QColor, size=12):
-        pix = QPixmap(size, size)
-        pix.fill(Qt.GlobalColor.transparent)
+        self.signals = WiFiSignals()
+        self.signals.update_plot.connect(self.update_plot)
+        self.signals.update_network.connect(self.update_network)
 
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(0, 0, size, size)
-        painter.end()
+        self.color_map = pg.colormap.get("viridis")
+        self.color_index = 0
 
-        return QIcon(pix)
+        self.scanner = WiFiScanner(
+            interface,
+            ui_callback=self._emit_plot,
+            list_callback=self._emit_network
+        )
 
-    def rssi_color(rssi):
-        if rssi is None:
-            return QColor("gray")
-        if rssi > -50:
-            return QColor("green")
-        elif rssi > -70:
-            return QColor("orange")
-        else:
-            return QColor("red")
+        threading.Thread(
+            target=self.scanner.start,
+            daemon=True
+        ).start()
 
-    def update_network(self, mac, rssi, vendor, security, freq, channel):
+
+    def _emit_plot(self, data):
+        self.signals.update_plot.emit(data)
+
+    def _emit_network(self, ssid, mac, rssi, security, freq, channel):
+        self.signals.update_network.emit(
+            ssid, mac, rssi, security, freq, channel
+        )
+
+    def update_plot(self, ssid_channels):
+        attenuation = 40
+        channels = range(1, 28)
+
+        for ssid, channel_data in list(ssid_channels.items()):
+            for center_ch, rssi in list(channel_data.items()):
+                key = f"{ssid}_{center_ch}"
+
+                if key not in self.curves:
+                    color = self.color_map.map(
+                        (self.color_index % 200) / 200,
+                        mode="qcolor"
+                    )
+                    self.color_index += 10
+
+                    curve = self.plot.plot(
+                        pen=pg.mkPen(color=color, width=2)
+                    )
+                    label = pg.TextItem(
+                        f"{ssid} (ch {center_ch})",
+                        color=color
+                    )
+                    self.plot.addItem(label)
+
+                    self.curves[key] = {
+                        "curve": curve,
+                        "label": label
+                    }
+
+                if center_ch <= 14:
+                    a = -8.0   
+                else:
+                    a = -1.5  
+
+                xs, ys = [], []
+                for ch in channels:
+                    y = a * (ch - center_ch) ** 2 + rssi
+                    xs.append(ch)
+                    ys.append(y)
+
+                entry = self.curves[key]
+                entry["curve"].setData(xs, ys)
+
+                if not hasattr(entry["curve"], "_tooltip_set"):
+                    entry["curve"].setToolTip(f"{ssid} (ch {center_ch})")
+                    entry["curve"].setFillLevel(-120)
+                    fill_color = pg.mkColor(entry["curve"].opts["pen"].color())
+                    fill_color.setAlpha(60)
+                    entry["curve"].setBrush(pg.mkBrush(fill_color))
+                    entry["curve"]._tooltip_set = True 
+
+                peak = max(ys)
+                peak_ch = xs[ys.index(peak)]
+                entry["label"].setPos(peak_ch + 0.2, peak)
+
+
+
+    def update_network(self, ssid, mac, rssi, security, freq, channel):
+        vendor = self.vendor_table.get(mac[:8].upper(), "Unknown")
+
         for row in range(self.network_table.rowCount()):
             if self.network_table.item(row, 1).text() == mac:
                 self.network_table.item(row, 2).setText(str(rssi))
                 self.network_table.item(row, 0).setIcon(
-                    make_signal_icon(rssi_color(rssi))
+                    self._signal_icon(self._rssi_color(rssi))
                 )
                 return
 
@@ -99,18 +172,19 @@ class WifiAnalyzerTab(QWidget):
         self.network_table.insertRow(row)
 
         signal_item = QTableWidgetItem()
-        signal_item.setToolTip(f"RSSI: {rssi} dBm")
-        signal_item.setIcon(make_signal_icon(rssi_color(rssi)))
+        signal_item.setIcon(
+            self._signal_icon(self._rssi_color(rssi))
+        )
         signal_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.network_table.setItem(row, 0, signal_item)
 
         values = [
             mac,
             str(rssi),
-            vendor or "Unknown",
-            security or "Unknown",
-            freq or "Unknown",
-            channel or "Unknown"
+            vendor,
+            ",".join(security) if security else "Open",
+            str(freq),
+            str(channel)
         ]
 
         for col, val in enumerate(values, start=1):
@@ -118,3 +192,41 @@ class WifiAnalyzerTab(QWidget):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.network_table.setItem(row, col, item)
 
+
+
+    def get_vendor_table(self, filename="vendors.csv"):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(script_dir)
+
+        csv_path = os.path.join(parent_dir, "resources", filename)
+
+        vendor_table = {}
+
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+            for row in reader:
+                prefix = row["Mac Prefix"].strip().upper()
+                vendor = row["Vendor Name"].strip()
+
+                vendor_table[prefix] = vendor
+
+        return vendor_table
+    
+    def _signal_icon(self, color, size=12):
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(0, 0, size, size)
+        p.end()
+        return QIcon(pix)
+
+    def _rssi_color(self, rssi):
+        if rssi > -50:
+            return QColor("green")
+        elif rssi > -70:
+            return QColor("orange")
+        return QColor("red")
