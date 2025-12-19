@@ -9,6 +9,21 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal
 from scapy.all import *
+import logging
+
+from scapy.layers.dot11 import Dot11
+from scapy.layers.inet import TCP, UDP, IP
+from scapy.layers.l2 import Ether
+
+from wifi_packet_parser import WiFiPacketParser
+from protocol_parser import ProtocolParser
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,  
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 class PacketSnifferTab(QWidget):
     def __init__(self):
@@ -122,58 +137,214 @@ class PacketSnifferTab(QWidget):
 class SnifferThread(QThread):
     packet_received = pyqtSignal(dict)
 
-    def __init__(self, iface, channel, mode):
+    def __init__(self, interface, channel, mode):
         super().__init__()
-        self.iface = iface
+        self.interface = interface
         self.channel = channel
         self.mode = mode
-        self._running = True
+        self.stop_flag = False
 
     def run(self):
-        sniff(
-            iface=self.iface,
-            prn=self.process_packet,
-            store=False,
-            stop_filter=lambda _: not self._running,
-        )
+        # sniff(iface=self.interface, prn=self.process_packet, store=False, stop_filter=lambda _: self.stop_flag)
+        if self.mode == "Monitor":
+            self.sniff_manual(self.interface, self.process_packet_monitor)
+        else:
+            self.sniff_manual(self.interface, self.process_packet_managed)
+        
+    def sniff_manual(self, interface, callback):
+        logger.info("Sniffing in mode %s", self.mode)
+        self.stop_flag = False
 
-    def process_packet(self, pkt):
-        if not self._running:
+        while not self.stop_flag:
+            try:
+                sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+                sock.bind((interface, 0))
+                sock.setblocking(False)
+                logger.debug("Socket bound to interface %s", interface)
+                break 
+            except OSError as e:
+                logger.error("Socket: Failed to bind socket on interface %s: %s", interface, e)
+                logger.debug("Socket: Retrying in 1 second...")
+                time.sleep(1)
+            except Exception as e:
+                logger.error("Socket: Unexpected socket error: %s", e)
+                return
+
+        while not self.stop_flag:
+            try:
+                try:
+                    ready, _, _ = select.select([sock], [], [], 0.5)
+                    if ready:
+                        packet, _ = sock.recvfrom(65535)
+                        callback(packet)
+                except Exception as e:
+                    logger.error("Socket error: %s", e)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                logger.error("Socket: error while receiving: %s", e)
+
+        sock.close()
+        logger.info("Socket: socket closed")
+
+    def process_packet_monitor(self, packet):
+        src_ip = dst_ip = ""
+        ttl = ""
+        src_port = dst_port =  ""
+        payload = ""
+
+        has_dot11 = False
+        has_ip = False
+        has_tcp = False
+        has_udp = False
+
+        rssi, rt_len = WiFiPacketParser.parse_radiotap(packet)
+        frame_type, frame_subtype, src_mac, dst_mac = WiFiPacketParser.parse_80211_header(packet, rt_len)
+
+        if frame_type is not None:
+            has_dot11 = True
+
+        offset = rt_len + 24
+
+        if len(packet) >= offset + 8 and packet[offset+6:offset+8] == b"\x08\x00":
+            ip = ProtocolParser.parse_ip(packet, offset + 8)
+            if ip:
+                logger.debug("Protocols: IP identified")
+                has_ip = True
+
+        if has_ip:
+            if ip["protocol"] == 6:
+                tcp = ProtocolParser.parse_tcp(packet, ip["offset"])
+                if tcp:
+                    logger.debug("Protocols: TCP identified")
+                    has_tcp = True
+            elif ip["protocol"] == 17:
+                udp = ProtocolParser.parse_udp(packet, ip["offset"])
+                if udp:
+                    logger.debug("Protocols: UDP identified")
+                    has_udp = True
+
+        if has_tcp:
+            layer = "TCP"
+            src_port = tcp["src_port"]
+            dst_port = tcp["dst_port"]
+            payload = tcp["payload"]
+        elif has_udp:
+            layer = "UDP"
+            src_port = udp["src_port"]
+            dst_port = udp["dst_port"]
+        elif has_ip:
+            layer = "IP"
+            src_ip = ip["src_ip"]
+            dst_ip = ip["dst_ip"]
+            ttl = ip["ttl"]
+        elif has_dot11:
+            layer = "802.11"
+        else:
+            layer = "RadioTap/Raw/Unverified"
+
+        self.packet_received.emit({
+            "layer": layer,
+            "src_mac": src_mac,
+            "dst_mac": dst_mac,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "ttl": ttl,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "payload": payload
+        })
+        time.sleep(1)
+
+    def process_packet_managed(self, packet):
+        eth_len = 14
+        if len(packet) < eth_len:
+            return
+
+        eth_header = packet[:eth_len]
+        dst_mac, src_mac, proto = struct.unpack('!6s6sH', eth_header)
+        dst_mac = ':'.join('%02x' % b for b in dst_mac)
+        src_mac = ':'.join('%02x' % b for b in src_mac)
+
+        payload = packet[eth_len:]
+        layer = "Ethernet"
+        src_ip = dst_ip = ttl = ""
+        src_port = dst_port = ""
+
+        if proto == 0x0800 and len(payload) >= 20: 
+            layer = "IP"
+            ip_header = payload[:20]
+            iph = struct.unpack('!BBHHHBBH4s4s', ip_header)
+            ttl = iph[5]
+            src_ip = socket.inet_ntoa(iph[8])
+            dst_ip = socket.inet_ntoa(iph[9])
+            protocol = iph[6]
+
+            ip_payload = payload[20:]
+            if protocol == 6 and len(ip_payload) >= 20:  # TCP
+                layer = "TCP"
+                tcph = struct.unpack('!HHLLBBHHH', ip_payload[:20])
+                src_port, dst_port = tcph[0], tcph[1]
+                payload_data = ip_payload[20:120]
+            elif protocol == 17 and len(ip_payload) >= 8:  # UDP
+                layer = "UDP"
+                udph = struct.unpack('!HHHH', ip_payload[:8])
+                src_port, dst_port = udph[0], udph[1]
+                payload_data = ip_payload[8:108]
+            else:
+                payload_data = b""
+
+            payload = payload_data.decode(errors="ignore") if payload_data else ""
+
+        self.packet_received.emit({
+            "layer": layer,
+            "src_mac": src_mac,
+            "dst_mac": dst_mac,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "ttl": ttl,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "payload": payload
+        })
+
+    def process_packet(self, packet):
+        if self.stop_flag:
             return True
 
-        layer = pkt.name
+        layer = packet.name
         src_mac = dst_mac = src_ip = dst_ip = ""
         ttl = src_port = dst_port = payload = ""
 
-        if pkt.haslayer(TCP):
+        if packet.haslayer(TCP):
             layer = "TCP"
-        elif pkt.haslayer(UDP):
+        elif packet.haslayer(UDP):
             layer = "UDP"
-        elif pkt.haslayer(IP):
+        elif packet.haslayer(IP):
             layer = "IP"
-        elif pkt.haslayer(Dot11):
+        elif packet.haslayer(Dot11):
             layer = "802.11"
 
-        if pkt.haslayer(Dot11):
-            src_mac = pkt.addr2 or ""
-            dst_mac = pkt.addr1 or ""
-        elif pkt.haslayer(Ether):
-            src_mac = pkt[Ether].src
-            dst_mac = pkt[Ether].dst
+        if packet.haslayer(Dot11):
+            src_mac = packet.addr2 or ""
+            dst_mac = packet.addr1 or ""
+        elif packet.haslayer(Ether):
+            src_mac = packet[Ether].src
+            dst_mac = packet[Ether].dst
 
-        if pkt.haslayer(IP):
-            ip = pkt[IP]
+        if packet.haslayer(IP):
+            ip = packet[IP]
             src_ip = ip.src
             dst_ip = ip.dst
             ttl = ip.ttl
 
-        if pkt.haslayer(TCP):
-            l4 = pkt[TCP]
+        if packet.haslayer(TCP):
+            l4 = packet[TCP]
             src_port = l4.sport
             dst_port = l4.dport
             payload = bytes(l4.payload)[:100].decode(errors="ignore")
-        elif pkt.haslayer(UDP):
-            l4 = pkt[UDP]
+        elif packet.haslayer(UDP):
+            l4 = packet[UDP]
             src_port = l4.sport
             dst_port = l4.dport
 
@@ -192,5 +363,5 @@ class SnifferThread(QThread):
         time.sleep(1)
 
     def stop(self):
-        self._running = False
+        self.stop_flag = True
 

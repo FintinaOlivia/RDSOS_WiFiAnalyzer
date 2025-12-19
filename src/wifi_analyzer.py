@@ -27,11 +27,51 @@ class WiFiSignals(QObject):
     update_network = pyqtSignal(str, str, int, list, int, int)
 
 
+def get_vendor_table(filename="vendors.csv"):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(script_dir)
+
+    csv_path = os.path.join(parent_dir, "resources", filename)
+
+    vendor_table = {}
+
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            prefix = row["Mac Prefix"].strip().upper()
+            vendor = row["Vendor Name"].strip()
+
+            vendor_table[prefix] = vendor
+
+    return vendor_table
+
+
+def _signal_icon(color, size=12):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(color)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(0, 0, size, size)
+    p.end()
+    return QIcon(pix)
+
+
+def _rssi_color(rssi):
+    if rssi > -50:
+        return QColor("green")
+    elif rssi > -70:
+        return QColor("orange")
+    return QColor("red")
+
+
 class WifiAnalyzerTab(QWidget):
     def __init__(self, interface="wlp3s0", vendor_table=None):
         super().__init__()
 
-        self.vendor_table = vendor_table or self.get_vendor_table()
+        self.vendor_table = vendor_table or get_vendor_table()
         self.curves = {}
         self.scanner = None
 
@@ -95,6 +135,12 @@ class WifiAnalyzerTab(QWidget):
             daemon=True
         ).start()
 
+    def on_tab_activated(self):
+        if not self.scanner.stop_flag:
+            self.start_sniffing()
+
+    def on_tab_deactivated(self):
+        self.scanner.stop_sniffing()
 
     def _emit_plot(self, data):
         self.signals.update_plot.emit(data)
@@ -163,7 +209,7 @@ class WifiAnalyzerTab(QWidget):
 
     def update_network(self, ssid, mac, rssi, security, freq, channel):
         vendor = self.vendor_table.get(mac[:8].upper(), "Unknown")
-        logging.info(
+        logging.debug(
         f"Debugging list_callback with SSID={ssid}, MAC={mac}, RSSI={rssi}, "
         f"Security={security}, Freq={freq}, Channel={channel}"
         )
@@ -172,7 +218,7 @@ class WifiAnalyzerTab(QWidget):
             if self.network_table.item(row, 1).text() == mac:
                 self.network_table.item(row, 2).setText(str(rssi))
                 self.network_table.item(row, 0).setIcon(
-                    self._signal_icon(self._rssi_color(rssi))
+                    _signal_icon(_rssi_color(rssi))
                 )
                 return
 
@@ -181,7 +227,7 @@ class WifiAnalyzerTab(QWidget):
 
         signal_item = QTableWidgetItem()
         signal_item.setIcon(
-            self._signal_icon(self._rssi_color(rssi))
+            _signal_icon(_rssi_color(rssi))
         )
         signal_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.network_table.setItem(row, 0, signal_item)
@@ -199,42 +245,3 @@ class WifiAnalyzerTab(QWidget):
             item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.network_table.setItem(row, col, item)
-
-
-
-    def get_vendor_table(self, filename="vendors.csv"):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(script_dir)
-
-        csv_path = os.path.join(parent_dir, "resources", filename)
-
-        vendor_table = {}
-
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-
-            for row in reader:
-                prefix = row["Mac Prefix"].strip().upper()
-                vendor = row["Vendor Name"].strip()
-
-                vendor_table[prefix] = vendor
-
-        return vendor_table
-    
-    def _signal_icon(self, color, size=12):
-        pix = QPixmap(size, size)
-        pix.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(color)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(0, 0, size, size)
-        p.end()
-        return QIcon(pix)
-
-    def _rssi_color(self, rssi):
-        if rssi > -50:
-            return QColor("green")
-        elif rssi > -70:
-            return QColor("orange")
-        return QColor("red")

@@ -1,6 +1,8 @@
 import threading
 import time
 import os
+from typing import Any
+
 from scapy.all import *
 from collections import defaultdict
 import time
@@ -8,10 +10,12 @@ import matplotlib.pyplot as plt
 import logging
 import socket
 
+from scapy.layers.dot11 import Dot11Beacon, Dot11ProbeResp, Dot11Elt
+
 from wifi_packet_parser import WiFiPacketParser
 
 # logging.basicConfig(
-#     level=logging.INFO,  
+#     level=logging.info,  
 #     format="%(asctime)s [%(levelname)s] %(message)s"
 # )
 logger = logging.getLogger(__name__)
@@ -53,32 +57,36 @@ class WiFiScanner:
             time.sleep(0.20)
 
     def handle_packet(self, pkt):
-        logger.info("Received packet, length=%d", len(pkt))
+        logger.debug("Received packet, length=%d", len(pkt))
 
         rssi, radiotap_len = WiFiPacketParser.parse_radiotap(pkt)
         if radiotap_len is None:
             logger.debug("Packet too short for Radiotap header, skipping")
             return
 
-        frame_type, frame_subtype, mac = WiFiPacketParser.parse_80211_header(pkt, radiotap_len)
+        frame_type, frame_subtype, mac, _ = WiFiPacketParser.parse_80211_header(pkt, radiotap_len)
         # Only process Beacon (8) or Probe Response (5)
         if frame_type != 0 or frame_subtype not in (5, 8):
             return
 
         ssid, channel, security = WiFiPacketParser.parse_tagged_parameters(pkt, radiotap_len)
 
-        logging.info(f"Parsed parameters: SSID={ssid}, Channel={channel}, Security={security}")
+        logging.debug(f"Parsed parameters: SSID={ssid}, Channel={channel}, Security={security}")
 
         if not ssid or not channel:
             return
 
         freq = 2412 + (channel - 1) * 5
         timestamp = time.time()
-        logging.info(f"Calculated frequency: {freq} MHz, Timestamp: {timestamp}")
+        logging.debug(f"Calculated frequency: {freq} MHz, Timestamp: {timestamp}")
 
 
         self.signal_counter.setdefault(ssid, {})[channel] = timestamp
         self.ssid_channels.setdefault(ssid, {})[channel] = rssi
+        self.updateUI(channel, freq, mac, rssi, security, ssid, timestamp)
+
+    def updateUI(self, channel: Any | None, freq: int | Any, mac, rssi, security: list[Any], ssid: Any | None,
+                 timestamp: float):
         expire = timestamp - 30
 
         for s in list(self.signal_counter.keys()):
@@ -96,10 +104,9 @@ class WiFiScanner:
             self.ui_callback(self.ssid_channels)
             self.list_callback(ssid, mac, rssi, security, freq, channel)
 
-
     def handle_packet_scapy(self, pkt):
         if pkt.haslayer(Dot11Beacon) or pkt.haslayer(Dot11ProbeResp):
-            ssid = pkt[Dot11Elt].info.decode(errors="ignore").strip()
+            ssid = pkt[Dot11Elt].debug.decode(errors="ignore").strip()
             if not ssid:
                 return
 
@@ -119,23 +126,7 @@ class WiFiScanner:
             timestamp = time.time()
             self.signal_counter[ssid][channel] = timestamp
             self.ssid_channels[ssid][channel] = rssi
-            expire_time = timestamp - 30
-
-            for s in list(self.signal_counter.keys()):
-                for ch in list(self.signal_counter[s].keys()):
-                    if self.signal_counter[s][ch] < expire_time:
-                        del self.signal_counter[s][ch]
-                        del self.ssid_channels[s][ch]
-
-                if not self.signal_counter[s]:
-                    del self.signal_counter[s]
-                if not self.ssid_channels[s]:
-                    del self.ssid_channels[s]
-
-
-            if self.ui_callback:
-                self.ui_callback(self.ssid_channels)
-                self.list_callback(ssid, mac, rssi, security, freq, channel)
+            self.updateUI(channel, freq, mac, rssi, security, ssid, timestamp)
 
 
     def start(self):
@@ -147,9 +138,9 @@ class WiFiScanner:
 
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
         s.bind((self.interface, 0))
-        logger.info("Bound socket")
+        logger.debug("Bound socket")
 
-        while self.stop_flag == False:
+        while not self.stop_flag:
             try:
                 pkt = s.recv(4096)
                 self.handle_packet(pkt)
@@ -159,8 +150,6 @@ class WiFiScanner:
                 continue 
 
         s.close()
-
-
 
     def stop(self):
         self.stop_flag = True

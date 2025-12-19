@@ -27,9 +27,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
+        self.previous_tab_index = 0
+
     def on_tab_changed(self, index):
-        if self.tabs.tabText(index) == "Package Sniffer":
-            self.tabs.widget(index).on_tab_activated()
+        previous_widget = self.tabs.widget(self.previous_tab_index)
+        if hasattr(previous_widget, "on_tab_closed"):
+            previous_widget.on_tab_closed()
+
+        current_widget = self.tabs.widget(index)
+        if hasattr(current_widget, "on_tab_activated"):
+            current_widget.on_tab_activated()
+
+        self.previous_tab_index = index
 
 def main():
     app = QApplication(sys.argv)

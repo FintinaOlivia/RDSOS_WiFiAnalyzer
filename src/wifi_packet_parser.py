@@ -50,7 +50,11 @@ class WiFiPacketParser:
         mac_bytes = dot11_header[10:16]
         mac = ':'.join(f"{b:02x}" for b in mac_bytes)
 
-        return frame_type, frame_subtype, mac
+        dst_mac_bytes = dot11_header[16:22]
+        dst_mac = ':'.join(f"{b:02x}" for b in dst_mac_bytes)
+
+
+        return frame_type, frame_subtype, mac, dst_mac
 
     @staticmethod
     def parse_tagged_parameters(packet, radiotap_len):
