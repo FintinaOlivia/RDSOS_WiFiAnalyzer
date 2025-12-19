@@ -1,12 +1,6 @@
-import threading
-import time
-import os
-from typing import Any
-
 from scapy.all import *
 from collections import defaultdict
 import time
-import matplotlib.pyplot as plt
 import logging
 import socket
 
@@ -14,10 +8,10 @@ from scapy.layers.dot11 import Dot11Beacon, Dot11ProbeResp, Dot11Elt
 
 from wifi_packet_parser import WiFiPacketParser
 
-# logging.basicConfig(
-#     level=logging.info,  
-#     format="%(asctime)s [%(levelname)s] %(message)s"
-# )
+logging.basicConfig(
+    # level=logging.info,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 CHANNELS = list(range(1, 14))  
@@ -128,6 +122,24 @@ class WiFiScanner:
             self.ssid_channels[ssid][channel] = rssi
             self.updateUI(channel, freq, mac, rssi, security, ssid, timestamp)
 
+    def updateUI(self, channel: Any | None, freq: int | Any, mac, rssi, security: list[Any], ssid: Any | None,
+                 timestamp: float):
+        expire = timestamp - 30
+
+        for s in list(self.signal_counter.keys()):
+            for ch in list(self.signal_counter[s].keys()):
+                if self.signal_counter[s][ch] < expire:
+                    del self.signal_counter[s][ch]
+                    del self.ssid_channels[s][ch]
+
+            if not self.signal_counter[s]:
+                del self.signal_counter[s]
+            if not self.ssid_channels[s]:
+                del self.ssid_channels[s]
+
+        if self.ui_callback:
+            self.ui_callback(self.ssid_channels)
+            self.list_callback(ssid, mac, rssi, security, freq, channel)
 
     def start(self):
         self.stop_flag = False
@@ -135,21 +147,22 @@ class WiFiScanner:
         threading.Thread(target=self.channel_hopper, daemon=True).start()
 
         # sniff(iface=self.interface, prn=self.handle_packet, monitor=True)
+        self.sniff_manual()
 
-        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
-        s.bind((self.interface, 0))
+    def sniff_manual(self):
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+        sock.bind((self.interface, 0))
         logger.debug("Bound socket")
 
         while not self.stop_flag:
             try:
-                pkt = s.recv(4096)
+                pkt = sock.recv(4096)
                 self.handle_packet(pkt)
             except socket.timeout:
-                continue 
+                continue
             except Exception:
-                continue 
-
-        s.close()
+                continue
+        sock.close()
 
     def stop(self):
         self.stop_flag = True

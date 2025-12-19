@@ -137,10 +137,10 @@ class WifiAnalyzerTab(QWidget):
 
     def on_tab_activated(self):
         if not self.scanner.stop_flag:
-            self.start_sniffing()
+            self.scanner.start()
 
     def on_tab_deactivated(self):
-        self.scanner.stop_sniffing()
+        self.scanner.stop()
 
     def _emit_plot(self, data):
         self.signals.update_plot.emit(data)

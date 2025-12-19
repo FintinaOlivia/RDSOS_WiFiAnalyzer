@@ -307,6 +307,7 @@ class SnifferThread(QThread):
             "dst_port": dst_port,
             "payload": payload
         })
+        time.sleep(0.5)
 
     def process_packet(self, packet):
         if self.stop_flag:
@@ -360,7 +361,7 @@ class SnifferThread(QThread):
             "payload": payload
         })
 
-        time.sleep(1)
+        time.sleep(0.5)
 
     def stop(self):
         self.stop_flag = True
