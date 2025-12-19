@@ -1,15 +1,14 @@
 import threading
 import csv
 import os
-import math
-import time 
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
     QGroupBox, QTableWidget, QTableWidgetItem,
     QSizePolicy
 )
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter
 
 import pyqtgraph as pg
@@ -74,7 +73,7 @@ class WifiAnalyzerTab(QWidget):
         self.vendor_table = vendor_table or get_vendor_table()
         self.curves = {}
         self.scanner = None
-
+        self.last_seen = {}
         main_layout = QHBoxLayout(self)
 
         plot_box = QGroupBox("WiFi Channel Analyzer")
@@ -93,14 +92,15 @@ class WifiAnalyzerTab(QWidget):
 
         plot_layout.addWidget(self.plot)
 
-        self.network_table = QTableWidget(0, 7)
+        self.network_table = QTableWidget(0, 8)
         self.network_table.setHorizontalHeaderLabels([
             "Signal",
+            "SSID",
             "MAC",
             "Strength (dBm)",
             "Vendor",
             "Security",
-            "Freq",
+            "Frequency",
             "Channel"
         ])
         self.network_table.setColumnWidth(0, 50)
@@ -114,8 +114,8 @@ class WifiAnalyzerTab(QWidget):
         self.network_table.horizontalHeader().setStretchLastSection(True)
         self.network_table.setAlternatingRowColors(True)
 
-        main_layout.addWidget(plot_box, 3)
-        main_layout.addWidget(self.network_table, 2)
+        main_layout.addWidget(plot_box, 7)
+        main_layout.addWidget(self.network_table, 6)
 
         self.signals = WiFiSignals()
         self.signals.update_plot.connect(self.update_plot)
@@ -126,9 +126,12 @@ class WifiAnalyzerTab(QWidget):
 
         self.scanner = WiFiScanner(
             interface,
-            ui_callback=self._emit_plot,
-            list_callback=self._emit_network
+            ui_callback=self._update_plot,
+            list_callback=self._update_network
         )
+        self.cleanup_timer = QTimer(self)
+        self.cleanup_timer.timeout.connect(self.remove_stale_networks)
+        self.cleanup_timer.start(5000)
 
         threading.Thread(
             target=self.scanner.start,
@@ -142,16 +145,15 @@ class WifiAnalyzerTab(QWidget):
     def on_tab_deactivated(self):
         self.scanner.stop()
 
-    def _emit_plot(self, data):
+    def _update_plot(self, data):
         self.signals.update_plot.emit(data)
 
-    def _emit_network(self, ssid, mac, rssi, security, freq, channel):
+    def _update_network(self, ssid, mac, rssi, security, freq, channel):
         self.signals.update_network.emit(
             ssid, mac, rssi, security, freq, channel
         )
 
     def update_plot(self, ssid_channels):
-        attenuation = 40
         channels = range(1, 28)
 
         for ssid, channel_data in list(ssid_channels.items()):
@@ -206,7 +208,6 @@ class WifiAnalyzerTab(QWidget):
                 entry["label"].setPos(peak_ch + 0.2, peak)
 
 
-
     def update_network(self, ssid, mac, rssi, security, freq, channel):
         vendor = self.vendor_table.get(mac[:8].upper(), "Unknown")
         logging.debug(
@@ -214,9 +215,11 @@ class WifiAnalyzerTab(QWidget):
         f"Security={security}, Freq={freq}, Channel={channel}"
         )
 
+        self.last_seen[mac] = time.time()
+
         for row in range(self.network_table.rowCount()):
-            if self.network_table.item(row, 1).text() == mac:
-                self.network_table.item(row, 2).setText(str(rssi))
+            if self.network_table.item(row, 2).text() == mac:
+                self.network_table.item(row, 3).setText(str(rssi))
                 self.network_table.item(row, 0).setIcon(
                     _signal_icon(_rssi_color(rssi))
                 )
@@ -233,6 +236,7 @@ class WifiAnalyzerTab(QWidget):
         self.network_table.setItem(row, 0, signal_item)
 
         values = [
+            ssid,
             mac,
             str(rssi),
             vendor,
@@ -245,3 +249,18 @@ class WifiAnalyzerTab(QWidget):
             item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.network_table.setItem(row, col, item)
+
+    def remove_stale_networks(self, max_age=30):
+        now = time.time()
+
+        for row in reversed(range(self.network_table.rowCount())):
+            mac_item = self.network_table.item(row, 2)
+            if not mac_item:
+                continue
+
+            mac = mac_item.text()
+            last = self.last_seen.get(mac, 0)
+
+            if now - last > max_age:
+                self.network_table.removeRow(row)
+                self.last_seen.pop(mac, None)

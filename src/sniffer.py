@@ -16,7 +16,7 @@ from scapy.layers.inet import TCP, UDP, IP
 from scapy.layers.l2 import Ether
 
 from wifi_packet_parser import WiFiPacketParser
-from protocol_parser import ProtocolParser
+from header_parser import HeaderParser
 
 logger = logging.getLogger(__name__)
 
@@ -207,19 +207,19 @@ class SnifferThread(QThread):
         offset = rt_len + 24
 
         if len(packet) >= offset + 8 and packet[offset+6:offset+8] == b"\x08\x00":
-            ip = ProtocolParser.parse_ip(packet, offset + 8)
+            ip = HeaderParser.parse_ip(packet, offset + 8)
             if ip:
                 logger.debug("Protocols: IP identified")
                 has_ip = True
 
         if has_ip:
             if ip["protocol"] == 6:
-                tcp = ProtocolParser.parse_tcp(packet, ip["offset"])
+                tcp = HeaderParser.parse_tcp(packet, ip["offset"])
                 if tcp:
                     logger.debug("Protocols: TCP identified")
                     has_tcp = True
             elif ip["protocol"] == 17:
-                udp = ProtocolParser.parse_udp(packet, ip["offset"])
+                udp = HeaderParser.parse_udp(packet, ip["offset"])
                 if udp:
                     logger.debug("Protocols: UDP identified")
                     has_udp = True
@@ -261,36 +261,52 @@ class SnifferThread(QThread):
         if len(packet) < eth_len:
             return
 
-        eth_header = packet[:eth_len]
-        dst_mac, src_mac, proto = struct.unpack('!6s6sH', eth_header)
-        dst_mac = ':'.join('%02x' % b for b in dst_mac)
-        src_mac = ':'.join('%02x' % b for b in src_mac)
+        eth = HeaderParser.parse_ethernet(packet)
+        if not eth:
+            return
+
+        protocol = eth["protocol"]
+        offset = eth["offset"]
+        dst_mac = eth["dst_mac"]
+        src_mac = eth["src_mac"]
 
         payload = packet[eth_len:]
         layer = "Ethernet"
         src_ip = dst_ip = ttl = ""
         src_port = dst_port = ""
 
-        if proto == 0x0800 and len(payload) >= 20: 
-            layer = "IP"
-            ip_header = payload[:20]
-            iph = struct.unpack('!BBHHHBBH4s4s', ip_header)
-            ttl = iph[5]
-            src_ip = socket.inet_ntoa(iph[8])
-            dst_ip = socket.inet_ntoa(iph[9])
-            protocol = iph[6]
+        if protocol == 0x0800:
+            ip = HeaderParser.parse_ip(packet, offset)
+            if not ip:
+                return
 
-            ip_payload = payload[20:]
-            if protocol == 6 and len(ip_payload) >= 20:  # TCP
+            layer = "IP"
+            src_ip = ip["src_ip"]
+            dst_ip = ip["dst_ip"]
+            ttl = ip["ttl"]
+            protocol = ip["protocol"]
+
+            offset = ip["offset"]
+            if protocol == 6:
+                tcp = HeaderParser.parse_tcp(packet, offset)
+                if not tcp:
+                    return
+
                 layer = "TCP"
-                tcph = struct.unpack('!HHLLBBHHH', ip_payload[:20])
-                src_port, dst_port = tcph[0], tcph[1]
-                payload_data = ip_payload[20:120]
-            elif protocol == 17 and len(ip_payload) >= 8:  # UDP
+                src_port = tcp["src_port"]
+                dst_port = tcp["dst_port"]
+                payload_data = tcp["payload"]
+
+            elif protocol == 17:
+                udp = HeaderParser.parse_udp(packet, offset)
+                if not udp:
+                    return
+
                 layer = "UDP"
-                udph = struct.unpack('!HHHH', ip_payload[:8])
-                src_port, dst_port = udph[0], udph[1]
-                payload_data = ip_payload[8:108]
+                src_port = udp["src_port"]
+                dst_port = udp["dst_port"]
+                payload_data = b""
+
             else:
                 payload_data = b""
 
