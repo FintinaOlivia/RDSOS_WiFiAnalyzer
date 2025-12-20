@@ -43,7 +43,7 @@ class PacketSnifferTab(QWidget):
         self.interface_combo.addItems(["wlp3s0"])
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Monitor", "Managed"])
+        self.mode_combo.addItems(["Monitor","Managed"])
 
         dropdown_layout.addWidget(QLabel("Channels:"))
         dropdown_layout.addWidget(self.channel_combo)
@@ -188,60 +188,53 @@ class SnifferThread(QThread):
         logger.info("Socket: socket closed")
 
     def process_packet_monitor(self, packet):
-        src_ip = dst_ip = ""
-        ttl = ""
-        src_port = dst_port =  ""
+        src_ip = dst_ip = ttl = ""
+        src_port = dst_port = ""
         payload = ""
-
-        has_dot11 = False
-        has_ip = False
-        has_tcp = False
-        has_udp = False
+        layer = "802.11"
 
         rssi, rt_len = WiFiPacketParser.parse_radiotap(packet)
-        frame_type, frame_subtype, src_mac, dst_mac = WiFiPacketParser.parse_80211_header(packet, rt_len)
+        frame_type, frame_subtype, src_mac, dst_mac = \
+            WiFiPacketParser.parse_80211_header(packet, rt_len)
 
-        if frame_type is not None:
-            has_dot11 = True
+        if frame_type is None:
+            return
 
         offset = rt_len + 24
+        if frame_type == 2 and (frame_subtype & 0x08):
+            offset += 2
 
-        if len(packet) >= offset + 8 and packet[offset+6:offset+8] == b"\x08\x00":
-            ip = HeaderParser.parse_ip(packet, offset + 8)
-            if ip:
-                logger.debug("Protocols: IP identified")
-                has_ip = True
+        if len(packet) >= offset + 8:
+            llc_header = packet[offset: offset + 8]
 
-        if has_ip:
-            if ip["protocol"] == 6:
-                tcp = HeaderParser.parse_tcp(packet, ip["offset"])
-                if tcp:
-                    logger.debug("Protocols: TCP identified")
-                    has_tcp = True
-            elif ip["protocol"] == 17:
-                udp = HeaderParser.parse_udp(packet, ip["offset"])
-                if udp:
-                    logger.debug("Protocols: UDP identified")
-                    has_udp = True
+            if llc_header.startswith(b"\xaa\xaa\x03"):
+                eth_type = struct.unpack(">H", llc_header[6:8])[0]
+                offset += 8
 
-        if has_tcp:
-            layer = "TCP"
-            src_port = tcp["src_port"]
-            dst_port = tcp["dst_port"]
-            payload = tcp["payload"]
-        elif has_udp:
-            layer = "UDP"
-            src_port = udp["src_port"]
-            dst_port = udp["dst_port"]
-        elif has_ip:
-            layer = "IP"
-            src_ip = ip["src_ip"]
-            dst_ip = ip["dst_ip"]
-            ttl = ip["ttl"]
-        elif has_dot11:
-            layer = "802.11"
-        else:
-            layer = "RadioTap/Raw/Unverified"
+                if eth_type == 0x0800:
+                    ip = HeaderParser.parse_ip(packet, offset)
+                    if ip:
+                        layer = "IP"
+                        src_ip = ip["src_ip"]
+                        dst_ip = ip["dst_ip"]
+                        ttl = ip["ttl"]
+                        protocol = ip["protocol"]
+                        offset = ip["offset"]
+
+                        if protocol == 6:
+                            tcp = HeaderParser.parse_tcp(packet, offset)
+                            if tcp:
+                                layer = "TCP"
+                                src_port = tcp["src_port"]
+                                dst_port = tcp["dst_port"]
+                                payload = tcp["payload"]
+
+                        elif protocol == 17:
+                            udp = HeaderParser.parse_udp(packet, offset)
+                            if udp:
+                                layer = "UDP"
+                                src_port = udp["src_port"]
+                                dst_port = udp["dst_port"]
 
         self.packet_received.emit({
             "layer": layer,
@@ -254,7 +247,7 @@ class SnifferThread(QThread):
             "dst_port": dst_port,
             "payload": payload
         })
-        time.sleep(1)
+        time.sleep(0.25)
 
     def process_packet_managed(self, packet):
         eth_len = 14
@@ -305,12 +298,14 @@ class SnifferThread(QThread):
                 layer = "UDP"
                 src_port = udp["src_port"]
                 dst_port = udp["dst_port"]
-                payload_data = b""
+                payload_data = ""
 
             else:
-                payload_data = b""
+                payload_data = ""
 
-            payload = payload_data.decode(errors="ignore") if payload_data else ""
+            payload = payload_data
+        else:
+            payload = ""
 
         self.packet_received.emit({
             "layer": layer,
@@ -323,7 +318,7 @@ class SnifferThread(QThread):
             "dst_port": dst_port,
             "payload": payload
         })
-        time.sleep(0.5)
+        time.sleep(0.25)
 
     def process_packet(self, packet):
         if self.stop_flag:

@@ -1,3 +1,4 @@
+import subprocess
 import threading
 import csv
 import os
@@ -137,6 +138,8 @@ class WifiAnalyzerTab(QWidget):
             target=self.scanner.start,
             daemon=True
         ).start()
+
+        subprocess.run(["./scripts/monitor_mode.sh"], check=True)
 
     def on_tab_activated(self):
         if not self.scanner.stop_flag:
