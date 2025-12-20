@@ -72,19 +72,19 @@ class HeaderParser:
         is_http = src_port == 80 or dst_port == 80
 
         if is_http:
-            logger.warning("is HTTP!!")
+            logger.info("Packet is HTTP!!")
             try:
                 payload = payload_bytes.decode("utf-8", errors="ignore")
                 payload = "".join(
                     c if c in string.printable else "." for c in payload
                 )
             except:
-                payload = "<Binary>"
+                payload = "Binary payload"
         else:
             payload = ""
 
-        logger.warning("raw payload: %s", payload_bytes)
-        logger.warning("processed payload: %s", payload)
+        logger.debug("Raw TCP payload: %s", payload_bytes)
+        logger.debug("Processed TCP payload: %s", payload)
 
         return {
             "src_port": src_port,
